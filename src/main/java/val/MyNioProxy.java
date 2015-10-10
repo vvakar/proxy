@@ -1,5 +1,6 @@
 package val;
 
+import javax.net.ssl.SSLContext;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.StringReader;
@@ -12,72 +13,87 @@ import java.nio.channels.SocketChannel;
 import java.util.HashSet;
 import java.util.Set;
 
-/**
- * Created by valentin.vakar on 10/9/15.
- */
 public class MyNioProxy {
+    private final ByteBuffer buffer = ByteBuffer.allocate(4096);
+
     private void doWork() throws Exception {
         ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.bind(new InetSocketAddress(8001));
         serverSocketChannel.configureBlocking(false);
-        ByteBuffer buffer = ByteBuffer.allocate(4096);
         Selector selector = Selector.open();
         while (true) {
-            SocketChannel channel = serverSocketChannel.accept();
-            if (channel != null) {
-                System.out.println("Accepted");
-                channel.configureBlocking(false);
-                channel.register(selector, SelectionKey.OP_READ);
-            }
-
-
-            int selected;
-            if ((selected = selector.selectNow()) > 0) {
-                Set<SelectionKey> keySet = selector.selectedKeys();
-                for (SelectionKey key : new HashSet<SelectionKey>(keySet)) {
-                    keySet.remove(key);
-                    if (key.isReadable()) {
-                        SocketChannel ch = (SocketChannel) key.channel();
-                        SocketChannel sink = (SocketChannel) key.attachment();
-
-
-                        int bytesRead;
-                        if (sink == null) {
-                            bytesRead = ch.read(buffer);
-                            buffer.flip();
-                            String request = parseHttpRequest(buffer);
-                            System.out.println("Request: \n" + request);
-                            sink = createChannelBasedOnHttpRequest(request);
-                            key.attach(sink);
-                            sink.register(selector, SelectionKey.OP_READ, channel);
-                            buffer.rewind();
-                            sink.write(buffer);
-                            buffer.clear();
-                        }
-
-                        while ((bytesRead = ch.read(buffer)) > 0) {
-                            buffer.flip();
-                            sink.write(buffer);
-                            buffer.clear();
-                        }
-
-                        if (bytesRead == -1) {
-                            System.out.println("Closing " + sink);
-                            ch.close();
-                            sink.close();
-                        }
-
-                        buffer.clear();
-                    } else {
-                        throw new IllegalStateException("Key should not be ready for " + key.readyOps());
-                    }
-                }
-            } else {
-                Thread.sleep(300);
+            accept(serverSocketChannel, selector);
+            if (!process(selector)) {
+                // no action, give it some rest
+                Thread.sleep(200);
             }
         }
     }
 
+    private boolean process(Selector selector) throws IOException {
+        boolean processed = false;
+        if (selector.selectNow() > 0) {
+            Set<SelectionKey> keySet = selector.selectedKeys();
+            for (SelectionKey key : new HashSet<SelectionKey>(keySet)) {
+                keySet.remove(key);
+                processed = true;
+                buffer.clear();
+
+                if (key.isReadable()) {
+                    SocketChannel ch = (SocketChannel) key.channel();
+                    SocketChannel sink = (SocketChannel) key.attachment();
+
+                    if (sink == null) {
+                        sink = initializeSink(selector, key, ch);
+                    }
+
+                    boolean shouldClose = copyLarge(ch, sink);
+
+                    if (shouldClose) {
+                        System.out.println("Closing " + sink);
+                        ch.close();
+                        sink.close();
+                    }
+                } else {
+                    throw new IllegalStateException("Key should only be ready for " + key.readyOps());
+                }
+            }
+        }
+        return processed;
+    }
+
+    private boolean copyLarge(SocketChannel ch, SocketChannel sink) throws IOException {
+        int bytesRead;
+        while ((bytesRead = ch.read(buffer)) > 0) {
+            buffer.flip();
+            sink.write(buffer);
+            buffer.clear();
+        }
+        return bytesRead == -1;
+    }
+
+    private SocketChannel initializeSink(Selector selector, SelectionKey key, SocketChannel ch) throws IOException {
+        int bytesRead = ch.read(buffer);
+        buffer.flip();
+        String request = parseHttpRequest(buffer);
+        System.out.println("Request: \n" + request);
+        SocketChannel sink = createChannelBasedOnHttpRequest(request);
+        key.attach(sink);
+        sink.register(selector, SelectionKey.OP_READ, ch);
+        buffer.rewind();
+        sink.write(buffer);
+        buffer.clear();
+        return sink;
+    }
+
+    private void accept(ServerSocketChannel serverSocketChannel, Selector selector) throws IOException {
+        SocketChannel channel = serverSocketChannel.accept();
+        if (channel != null) {
+            System.out.println("Accepted " + channel);
+            channel.configureBlocking(false);
+            channel.register(selector, SelectionKey.OP_READ);
+        }
+    }
 
     private SocketChannel createChannelBasedOnHttpRequest(String httpRequest) throws IOException {
         BufferedReader reader = new BufferedReader(new StringReader(httpRequest));
@@ -107,20 +123,6 @@ public class MyNioProxy {
             sb.append((char) buffer.get());
         }
         return sb.toString();
-    }
-
-    private int readBuffer(ByteBuffer buffer, SocketChannel ch) throws IOException, InterruptedException {
-        int bytesRead;
-        while ((bytesRead = ch.read(buffer)) > 0) {
-
-            buffer.flip();
-
-            while (buffer.hasRemaining()) {
-                System.out.print((char) buffer.get());
-            }
-            buffer.clear();
-        }
-        return bytesRead;
     }
 
     public static void main(String[] asdf) throws Exception {
