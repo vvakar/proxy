@@ -15,6 +15,7 @@ import java.util.Set;
 
 public class MyNioProxy {
     private final ByteBuffer buffer = ByteBuffer.allocate(4096);
+    final String OK = "HTTP/1.1 200 OK\r\n\r\n";
 
     private void doWork() throws Exception {
         ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
@@ -80,8 +81,18 @@ public class MyNioProxy {
         SocketChannel sink = createChannelBasedOnHttpRequest(request);
         key.attach(sink);
         sink.register(selector, SelectionKey.OP_READ, ch);
-        buffer.rewind();
-        sink.write(buffer);
+
+        if (request.toUpperCase().startsWith("GET")) {
+            buffer.rewind();
+            sink.write(buffer);
+        } else if(request.toUpperCase().startsWith("CONNECT")) {
+            buffer.clear();
+            buffer.put(OK.getBytes());
+            buffer.flip();
+            ch.write(buffer);
+        } else {
+            throw new IllegalStateException("Unknown request:" + request);
+        }
         buffer.clear();
         return sink;
     }
